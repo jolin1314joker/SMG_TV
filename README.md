@@ -1,6 +1,8 @@
 # SMG_TV
 打开网页即可收看SMGTV，并解除试看倒计时与切页暂停等限制（修复五星体育串台至东方卫视 + 频道Token隔离 + Safari/Stay 兼容 + 回放与进度条拖动）
-基于https://github.com/Nolan180940/smg-f1-unlock/tree/master提供的解决思路修复BUG二改完成
+
+# 基于https://github.com/Nolan180940/smg-f1-unlock/tree/master
+ 提供的解决思路修复BUG二改完成
 
 ## 使用方法
 
