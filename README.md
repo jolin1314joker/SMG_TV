@@ -74,8 +74,8 @@
 
 ---
 
-# 基于https://github.com/Nolan180940/smg-f1-unlock/tree/master
- 提供的解决思路修复BUG二改完成
+# 脚本来源
+ 基于https://github.com/Nolan180940/smg-f1-unlock/tree/master提供的解决思路修复BUG二改完成
  
  ---
 
