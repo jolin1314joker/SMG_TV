@@ -1,38 +1,49 @@
 // ==UserScript==
-// @name             收看SMGTV电视节目
+// @name             收看SMGTV电视节目 (移动/桌面兼容修复版)
 // @namespace        https://github.com/jolin1314joker/SMG_TV
-// @version          0.20
-// @description      打开网页即可收看SMGTV，并解除试看倒计时与切页暂停等限制（修复五星体育串台至东方卫视 + 频道Token隔离 + Safari/Stay 兼容 + 回放与进度条拖动）
-// @author           https://github.com/Nolan180940
+// @version          0.21
+// @description      打开网页即可收看SMGTV，支持五星体育回看/直播、解除试看倒计时与全屏限制（移动端/电脑端全适配）
+// @author           GitHub:jolin1314joker
 // @match            https://live.kankanews.com/*
 // @match            https://m.kankanews.com/*
 // @match            http://live.kankanews.com/*
 // @match            http://m.kankanews.com/*
 // @icon             https://live.kankanews.com/favicon.ico
+// @require          https://cdn.jsdelivr.net/npm/jsencrypt@3.3.2/bin/jsencrypt.min.js
 // @grant            none
 // @run-at           document-body
 // @compatible       safari
 // @compatible       stay
+// @compatible       edge
+// @compatible       chrome
 // ==/UserScript==
 
 (function() {
     "use strict";
 
-    console.log("[SMGTV] ========== v0.20 (Channel-Isolated) ==========");
-    console.log("[SMGTV] URL:", location.href);
-    console.log("[SMGTV] UA:", navigator.userAgent);
+    console.log("[SMGTV] ========== v0.21 (Mobile & Desktop Unified) ==========");
+    console.log("[SMGTV] Current URL:", location.href);
+    console.log("[SMGTV] UserAgent:", navigator.userAgent);
 
-    // ===== 1. CSS: hide copyright mask =====
+    // ===== 0. Mobile URL parsing (Disabled history rewrite to prevent 404) =====
+    // 移除了会导致移动端 SPA 404 的 history.replaceState 重写
+
+    // ===== 1. CSS: 移除遮罩与提示层，优化移动端全屏表现 =====
     var style = document.createElement("style");
-    style.textContent = ".image-mask{display:none!important}.video-tip{display:none!important}";
+    style.textContent = [
+        ".image-mask { display: none !important; }",
+        ".video-tip { display: none !important; }",
+        ".loading-mask { pointer-events: none !important; }",
+        "video { object-fit: contain !important; background: #000 !important; }"
+    ].join("\n");
     (document.head || document.documentElement).appendChild(style);
-    console.log("[SMGTV] CSS injected");
 
-    // ===== 2. Patch webpack module 560 (E.a URL decryption bypass) =====
+    // ===== 2. 绕过 Webpack 内部的 E.a 解密限制 =====
     var _module560Patched = false;
     function patchModule560() {
         if (_module560Patched) return;
         try {
+            if (!window.webpackJsonp) return;
             window.webpackJsonp.push([[], {
                 '__smg_m560_probe': function(module, exports, __webpack_require__) {
                     try {
@@ -41,7 +52,6 @@
                             var origEa = mod560.a;
                             mod560.a = function(t) {
                                 if (typeof t === 'string' && t.indexOf('http') === 0) {
-                                    console.log("[SMGTV] [Replay] E.a bypass — plain URL passthrough:", t.substring(0, 80));
                                     return t;
                                 }
                                 return origEa.apply(this, arguments);
@@ -50,25 +60,24 @@
                             console.log("[SMGTV] Module 560 (E.a) patched successfully");
                         }
                     } catch(e) {
-                        console.warn("[SMGTV] Module 560 patch failed:", e.message);
+                        console.warn("[SMGTV] Module 560 patch error:", e.message);
                     }
                 }
             }, ['__smg_m560_probe']]);
         } catch(e) {
-            console.warn("[SMGTV] webpack chunk push failed:", e.message);
+            console.warn("[SMGTV] webpack probe failed:", e.message);
         }
     }
     patchModule560();
 
-    // ===== 3. Intercept API responses =====
+    // ===== 3. 拦截接口请求并触发响应修复 =====
     var origOpen = XMLHttpRequest.prototype.open;
     XMLHttpRequest.prototype.open = function(method, url) {
         var urlStr = String(url);
-        if (urlStr.indexOf("/content/pc/tv/") !== -1) {
+        if (urlStr.indexOf("/content/pc/tv/") !== -1 || urlStr.indexOf("/content/app/tv/") !== -1) {
             var xhr = this;
             xhr.addEventListener("readystatechange", function() {
                 if (xhr.readyState === 4 && xhr.status === 200) {
-                    console.log("[SMGTV] XHR response received for:", urlStr.substring(0, 80));
                     setTimeout(tryPatch, 30);
                 }
             });
@@ -77,24 +86,23 @@
     };
 
     var origFetch = window.fetch;
-    window.fetch = function(input, init) {
-        var urlStr = typeof input === "string" ? input : (input && input.url) || "";
-        if (urlStr.indexOf("/content/pc/tv/") !== -1) {
-            return origFetch.apply(this, arguments).then(function(resp) {
-                console.log("[SMGTV] fetch response received, re-patching Vue...");
-                setTimeout(tryPatch, 50);
-                return resp;
-            });
-        }
-        return origFetch.apply(this, arguments);
-    };
+    if (typeof origFetch === "function") {
+        window.fetch = function(input, init) {
+            var urlStr = typeof input === "string" ? input : (input && input.url) || "";
+            if (urlStr.indexOf("/content/pc/tv/") !== -1 || urlStr.indexOf("/content/app/tv/") !== -1) {
+                return origFetch.apply(this, arguments).then(function(resp) {
+                    setTimeout(tryPatch, 50);
+                    return resp;
+                });
+            }
+            return origFetch.apply(this, arguments);
+        };
+    }
 
-    console.log("[SMGTV] API interceptors ready");
-
-    // ===== 4. Patch Vue component =====
+    // ===== 4. Vue 组件与频道 ID 解析 =====
     function findComponent(root, name) {
         if (!root) return null;
-        if (root.$options && root.$options.name === name) return root;
+        if (root.$options && (root.$options.name === name || root.$options._componentTag === name)) return root;
         for (var i = 0; root.$children && i < root.$children.length; i++) {
             var found = findComponent(root.$children[i], name);
             if (found) return found;
@@ -104,49 +112,34 @@
 
     function findVue() {
         var el = document.querySelector(".huikan");
-        if (el && el.__vue__ && typeof el.__vue__.initPlayer === "function") {
-            return el.__vue__;
-        }
+        if (el && el.__vue__ && typeof el.__vue__.initPlayer === "function") return el.__vue__;
 
-        var root = document.querySelector("#__nuxt");
+        var root = document.querySelector("#__nuxt") || document.querySelector("#app");
         if (root && root.__vue__) {
-            var comp = findComponent(root.__vue__, "HuikanIndex");
-            if (comp && typeof comp.initPlayer === "function") {
-                return comp;
-            }
+            var comp = findComponent(root.__vue__, "HuikanIndex") || findComponent(root.__vue__, "huikan");
+            if (comp && typeof comp.initPlayer === "function") return comp;
         }
 
-        var all = document.querySelectorAll("[class*=huikan], [id*=huikan], .live-player, .video-wrap");
+        var all = document.querySelectorAll("[class*=huikan], [id*=huikan], .live-player, .video-wrap, .player-container");
         for (var i = 0; i < all.length; i++) {
             var v = all[i].__vue__;
-            if (v && typeof v.initPlayer === "function") {
-                return v;
-            }
+            if (v && typeof v.initPlayer === "function") return v;
         }
-
-        var any = document.querySelectorAll("*");
-        for (var j = 0; j < any.length && j < 500; j++) {
-            var vw = any[j].__vue__;
-            if (vw && vw.$options && vw.$options.name === "HuikanIndex") {
-                return vw;
-            }
-        }
-
         return null;
     }
 
-    // Helper: Determine currently targeted channel ID reliably
     function getCurChannelId(vue) {
         try {
-            if (vue && vue.programObj && vue.programObj.channel_id != null) {
-                return String(vue.programObj.channel_id);
-            }
+            // 优先从移动端 path /huikan/10 提取
+            var pathMatch = location.pathname.match(/\/huikan\/(\d+)/);
+            if (pathMatch) return String(pathMatch[1]);
+
             var urlParams = new URLSearchParams(location.search);
             var qId = urlParams.get("id");
             if (qId) return String(qId);
-            var pathMatch = location.pathname.match(/\/huikan\/(\d+)/);
-            if (pathMatch) return String(pathMatch[1]);
+
             if (vue) {
+                if (vue.programObj && vue.programObj.channel_id != null) return String(vue.programObj.channel_id);
                 if (vue.currChannel && vue.currChannel.id != null) return String(vue.currChannel.id);
                 if (vue.currChannelDetail && vue.currChannelDetail.id != null) return String(vue.currChannelDetail.id);
                 if (vue.programDetail && vue.programDetail.channel_info && vue.programDetail.channel_info.id != null) {
@@ -154,10 +147,10 @@
                 }
             }
         } catch(e) {}
-        return "10"; // Default: 10 (Five Star Sports)
+        return "10"; // 缺省为 10（五星体育）
     }
 
-    // ===== 4b. Token bootstrap (Channel-Isolated) =====
+    // ===== 5. 鉴权与 RSA 解密 =====
     var SMG_PUBKEY = "-----BEGIN PUBLIC KEY-----\n" +
         "MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDP5hzPUW5RFeE2xBT1ERB3hHZI\n" +
         "Votn/qatWhgc1eZof09qKjElFN6Nma461ZAwGpX4aezKP8Adh4WJj4u2O54xCXDt\n" +
@@ -166,10 +159,6 @@
         "-----END PUBLIC KEY-----";
     var SMG_API_SECRET = "28c8edde3d61a0411511d3b1866f0636";
     var SMG_API_VERSION = "2.42.23";
-    // Known donor IDs specifically belonging to Channel 10 (Five Star Sports)
-    var SMG_DONOR_IDS = [2215494, 2215102, 2213967];
-    var SMG_DONOR_SCAN_DAYS = 7;
-    // Map of channelId -> token object
     var _smgTokenCache = {};
 
     function smgMd5(str) {
@@ -179,10 +168,7 @@
             var m = (x >> 16) + (y >> 16) + (l >> 16);
             return (m << 16) | (l & 0xffff);
         }
-        function cmn(q, a, b, x, s, t) {
-            a = add(add(a, q), add(x, t));
-            return add(rl(a, s), b);
-        }
+        function cmn(q, a, b, x, s, t) { return add(rl(add(add(a, q), add(x, t)), s), b); }
         function ff(a, b, c, d, x, s, t) { return cmn((b & c) | ((~b) & d), a, b, x, s, t); }
         function gg(a, b, c, d, x, s, t) { return cmn((b & d) | (c & (~d)), a, b, x, s, t); }
         function hh(a, b, c, d, x, s, t) { return cmn(b ^ c ^ d, a, b, x, s, t); }
@@ -248,12 +234,17 @@
     function smgRsaDecrypt(enc) {
         try {
             if (!enc || typeof enc !== "string") return "";
-            if (typeof JSEncrypt === "undefined") return "";
+            var CryptCls = window.JSEncrypt || (typeof JSEncrypt !== "undefined" ? JSEncrypt : null);
+            if (!CryptCls) {
+                console.error("[SMGTV] JSEncrypt not available on page context!");
+                return "";
+            }
             var hex = window.atob(enc).split("").map(function(ch) {
                 return ("0" + ch.charCodeAt(0).toString(16)).slice(-2);
             }).join("").toUpperCase();
             if (!hex) return "";
-            var crypt = new JSEncrypt();
+
+            var crypt = new CryptCls();
             crypt.setPublicKey(SMG_PUBKEY);
             var out = "";
             for (var pos = 0; pos < hex.length;) {
@@ -268,7 +259,7 @@
             }
             return out;
         } catch (e) {
-            console.warn("[SMGTV] smgRsaDecrypt failed:", e && e.message);
+            console.warn("[SMGTV] RSA decrypt error:", e && e.message);
             return "";
         }
     }
@@ -282,9 +273,8 @@
             "Api-Version": "v1"
         };
         var merged = {};
-        var k;
-        for (k in params) merged[k] = params[k];
-        for (k in n) merged[k] = n[k];
+        for (var k in params) merged[k] = params[k];
+        for (var nk in n) merged[nk] = n[nk];
         var keys = Object.keys(merged).sort();
         var s = "";
         for (var i = 0; i < keys.length; i++) {
@@ -300,8 +290,7 @@
             return encodeURIComponent(k) + "=" + encodeURIComponent(params[k]);
         }).join("&");
         var headers = { "Accept": "application/json, text/plain, */*" };
-        var hk;
-        for (hk in signed) headers[hk] = signed[hk];
+        for (var hk in signed) headers[hk] = signed[hk];
         headers["M-Uuid"] = localStorage.getItem("uuid") || "";
         return fetch("https://kapi.kankanews.com" + path + (q ? "?" + q : ""), {
             headers: headers
@@ -332,42 +321,30 @@
     function smgTokenValid(t) {
         return !!t && !!t.token && (t.exp * 1000 - Date.now() > SMG_TOKEN_REFRESH_MARGIN);
     }
-    function smgTokenMsLeft(t) {
-        if (!t || !t.exp) return 0;
-        return t.exp * 1000 - Date.now();
-    }
 
-    // Precise donor finder: must belong to target channel
     function smgFindDonorId(vue, chId) {
         try {
             var targetChId = String(chId || getCurChannelId(vue));
-            var lists = [vue.programList, vue.currentProgramList, vue.playingProgramList];
+            var lists = [
+                vue.programList,
+                vue.currentProgramList,
+                vue.playingProgramList,
+                vue.programDetail && vue.programDetail.program_list
+            ];
             for (var i = 0; i < lists.length; i++) {
                 var arr = lists[i];
                 if (!Array.isArray(arr)) continue;
                 for (var j = 0; j < arr.length; j++) {
                     var p = arr[j];
-                    if (!p || !p.id || p.is_review !== 1) continue;
-
+                    if (!p || !p.id) continue;
                     var pChId = p.channel_id != null ? String(p.channel_id) : null;
-                    if (pChId && pChId !== targetChId) {
-                        continue; // Strictly filter out other channels (e.g. Dragon TV ch 1)
-                    }
-
-                    if (targetChId === "10") {
-                        if (p.name && p.name.indexOf("体育") !== -1) {
-                            return p.id;
-                        }
-                    } else {
+                    if (pChId && pChId !== targetChId) continue;
+                    if (p.is_review === 1 || p.can_review === 1) {
                         return p.id;
                     }
                 }
             }
         } catch (e) {}
-
-        if (String(chId) === "10") {
-            return SMG_DONOR_IDS[0];
-        }
         return null;
     }
 
@@ -388,62 +365,31 @@
 
         var tried = {};
         var queue = [];
-        function enqueue(id) {
-            if (id && !tried[id] && queue.indexOf(id) === -1) queue.push(id);
-        }
-
         var localDonor = smgFindDonorId(vue, curChId);
-        if (localDonor) enqueue(localDonor);
-
-        if (String(curChId) === "10") {
-            for (var i = 0; i < SMG_DONOR_IDS.length; i++) enqueue(SMG_DONOR_IDS[i]);
-        }
-
-        console.log("[SMGTV] [Token] channel:", curChId, "donor queue:", queue.join(","));
+        if (localDonor) queue.push(localDonor);
 
         var scanOffset = 0;
         function scanDay(offset, done) {
-            if (offset >= SMG_DONOR_SCAN_DAYS) {
-                done();
-                return;
-            }
+            if (offset >= 7) { done(); return; }
             var dateStr = smgDateStr(offset);
-            console.log("[SMGTV] [Token] scanning programs for donor (ch " + curChId + "):", dateStr);
             smgApiGet("/content/pc/tv/programs", { channel_id: curChId, date: dateStr }).then(function(data) {
                 var list = (data && data.result && data.result.programs) || [];
-                var added = 0;
                 for (var j = 0; j < list.length; j++) {
                     var p = list[j];
-                    if (p && p.is_review === 1 && p.id &&
-                        tried[p.id] === undefined && queue.indexOf(p.id) === -1) {
-                        if (String(curChId) === "10") {
-                            if (p.name && p.name.indexOf("体育") !== -1) {
-                                queue.unshift(p.id); // Priority for sports news
-                                added++;
-                            } else {
-                                queue.push(p.id);
-                                added++;
-                            }
-                        } else {
-                            queue.push(p.id);
-                            added++;
-                        }
+                    if (p && (p.is_review === 1 || p.can_review === 1) && p.id && !tried[p.id]) {
+                        queue.push(p.id);
                     }
                 }
-                console.log("[SMGTV] [Token] scan " + dateStr + ": +" + added + " donors");
                 done();
-            }).catch(function(e) {
-                console.warn("[SMGTV] [Token] scan failed for " + dateStr + ":", e && e.message);
-                done();
-            });
+            }).catch(function() { done(); });
         }
 
         function tryNext() {
             if (!queue.length) {
                 scanDay(scanOffset, function() {
                     scanOffset++;
-                    if (!queue.length && scanOffset >= SMG_DONOR_SCAN_DAYS) {
-                        console.error("[SMGTV] [Token] bootstrap failed: all donors empty for ch " + curChId);
+                    if (!queue.length && scanOffset >= 7) {
+                        console.error("[SMGTV] Failed to acquire donor token for ch:", curChId);
                         cb(null);
                         return;
                     }
@@ -452,40 +398,24 @@
                 return;
             }
             var donorId = queue.shift();
-            if (tried[donorId]) {
-                tryNext();
-                return;
-            }
+            if (tried[donorId]) { tryNext(); return; }
             tried[donorId] = true;
-            console.log("[SMGTV] [Token] fetching donor program/detail:", donorId);
+
             smgApiGet("/content/pc/tv/program/detail", { channel_program_id: donorId }).then(function(data) {
                 var res = (data && data.result) || {};
-                var enc = res.channel_info && res.channel_info.shift_address;
-                if (!enc && res.channel_info && res.channel_info.live_address) {
-                    enc = res.channel_info.live_address;
-                }
-                if (!enc) {
-                    console.warn("[SMGTV] [Token] donor empty, trying next (id=" + donorId + ")");
-                    tryNext();
-                    return;
-                }
-                var plain = smgRsaDecrypt(enc);
-                if (!plain) throw new Error("donor decrypt failed (id=" + donorId + ")");
-                var t = smgTokenFromUrl(plain);
-                if (!t) throw new Error("donor URL parse failed (id=" + donorId + ")");
+                var enc = res.channel_info && (res.channel_info.shift_address || res.channel_info.live_address);
+                if (!enc) { tryNext(); return; }
 
-                // Store isolated by channel ID
+                var plain = smgRsaDecrypt(enc);
+                if (!plain) { tryNext(); return; }
+
+                var t = smgTokenFromUrl(plain);
+                if (!t) { tryNext(); return; }
+
                 _smgTokenCache[curChId] = t;
-                if (String(curChId) === "10" && SMG_DONOR_IDS[0] !== donorId) {
-                    SMG_DONOR_IDS.unshift(donorId);
-                }
-                console.log("[SMGTV] [Token] ready for ch " + curChId + " via donor " + donorId + ", stream=" + t.stream,
-                    "exp=" + new Date(t.exp * 1000).toLocaleString());
+                console.log("[SMGTV] Token acquired for ch " + curChId + " via donor " + donorId);
                 cb(t);
-            }).catch(function(e) {
-                console.warn("[SMGTV] [Token] donor error, trying next:", e && e.message);
-                tryNext();
-            });
+            }).catch(function() { tryNext(); });
         }
         tryNext();
     }
@@ -507,81 +437,10 @@
             "&volcTime=" + t.volcTime;
     }
 
-    // Live watchdog
-    var _smgWatchdogTimer = null;
-    function smgStartLiveWatchdog(vue, player, getUrl) {
-        smgStopLiveWatchdog();
-        var failures = 0;
-        _smgWatchdogTimer = setInterval(function() {
-            try {
-                if (!vue.player || vue.player !== player) {
-                    smgStopLiveWatchdog();
-                    return;
-                }
-                var curChId = getCurChannelId(vue);
-                var cached = _smgTokenCache[curChId];
-                var left = smgTokenMsLeft(cached);
-                if (left < SMG_TOKEN_REFRESH_MARGIN) {
-                    console.log("[SMGTV] [Live] token expiring in " + Math.max(0, Math.round(left / 1000)) +
-                        "s for ch " + curChId + ", refreshing...");
-                    _smgTokenCache[curChId] = null;
-                    smgEnsureToken(vue, function(t) {
-                        if (!t || !vue.player || vue.player !== player) return;
-                        var url = getUrl(t);
-                        if (!url || typeof player.switchURL !== "function") return;
-                        console.log("[SMGTV] [Live] switching to fresh token URL");
-                        try {
-                            Promise.resolve(player.switchURL(url, { seamless: false, currentTime: 0 }))
-                                .then(function() {
-                                    failures = 0;
-                                    if (player.paused) { try { player.play(); } catch (e) {} }
-                                    console.log("[SMGTV] [Live] token refresh done");
-                                })
-                                .catch(function(e) {
-                                    console.error("[SMGTV] [Live] token refresh failed:", e && e.message);
-                                });
-                        } catch (e) {
-                            console.error("[SMGTV] [Live] switchURL threw:", e && e.message);
-                        }
-                    });
-                    return;
-                }
-                var vd = player.video;
-                if (vd && vd.error && vd.error.code === 4 && failures < 3) {
-                    failures++;
-                    console.warn("[SMGTV] [Live] media error 4, recovery attempt " + failures);
-                    _smgTokenCache[curChId] = null;
-                    smgEnsureToken(vue, function(t) {
-                        if (!t || !vue.player || vue.player !== player) return;
-                        var url = getUrl(t);
-                        if (!url || typeof player.switchURL !== "function") return;
-                        try {
-                            Promise.resolve(player.switchURL(url, { seamless: false, currentTime: 0 }))
-                                .then(function() { if (player.paused) { try { player.play(); } catch (e) {} } })
-                                .catch(function() {});
-                        } catch (e) {}
-                    });
-                } else if (vd && !vd.error) {
-                    failures = 0;
-                }
-            } catch (e) {
-                console.warn("[SMGTV] [Live] watchdog tick failed:", e && e.message);
-            }
-        }, 30000);
-        console.log("[SMGTV] [Live] watchdog started (30s tick)");
-    }
-    function smgStopLiveWatchdog() {
-        if (_smgWatchdogTimer) {
-            clearInterval(_smgWatchdogTimer);
-            _smgWatchdogTimer = null;
-        }
-    }
-
-    // ===== 4c. Replay: dynamic startTime + real source-switch seeking =====
+    // ===== 6. 播放器初始化与回看拖动支持 =====
     var _initPlayerPatched = false;
     function patchInitPlayer(vue) {
-        if (_initPlayerPatched) return;
-        if (!vue || typeof vue.initPlayer !== "function") return;
+        if (_initPlayerPatched || !vue || typeof vue.initPlayer !== "function") return;
 
         var origInitPlayer = vue.initPlayer;
         vue.initPlayer = function() {
@@ -592,254 +451,84 @@
                     var args = arguments;
                     var isLiveEdge = pObj.play !== 0;
                     var wantStart = isLiveEdge ? 0 : pObj.start_time;
+
                     smgEnsureToken(vue, function(t) {
                         if (!t) {
-                            console.error("[SMGTV] [Replay] no token, falling back to orig initPlayer");
                             return origInitPlayer.apply(self, args);
                         }
                         var shiftUrl = isLiveEdge ? smgBuildLiveUrl(t) : smgBuildShiftUrl(t, wantStart);
-                        if (shiftUrl) {
-                            pObj.is_shield = 0;
-                            pObj.is_review = 1;
-                            vue.isCopyright = true;
-                            vue.destroyPlayer();
+                        if (!shiftUrl) return origInitPlayer.apply(self, args);
 
-                            var volume = localStorage.getItem("playerVolume");
-                            volume = volume ? Number(volume) : 0.5;
+                        pObj.is_shield = 0;
+                        pObj.is_review = 1;
+                        vue.isCopyright = true;
+                        if (typeof vue.destroyPlayer === "function") vue.destroyPlayer();
 
-                            var programStartTime = isLiveEdge ? Math.floor(Date.now() / 1000) : pObj.start_time;
-                            var programEndTime = pObj.end_time || (programStartTime + 7200);
+                        var volume = localStorage.getItem("playerVolume");
+                        volume = volume ? Number(volume) : 0.6;
 
-                            vue.player = new vue.$xgplayer({
-                                el: vue.$refs.livePlayer,
-                                url: shiftUrl,
-                                isLive: isLiveEdge,
-                                fluid: true,
-                                crossOrigin: true,
-                                controls: true,
-                                volume: volume,
-                                playbackRate: [2, 1.5, 1.25, 1, 0.75, 0.5],
-                                ignores: ["cssFullscreen"],
-                                keyShortcut: true,
-                                lang: "zh-cn",
-                                closeVideoClick: true,
-                                plugins: [vue.$hlsPlayer]
-                            });
-                            vue.player.muted = vue.isMuted;
+                        var programStartTime = isLiveEdge ? Math.floor(Date.now() / 1000) : pObj.start_time;
+                        var programEndTime = pObj.end_time || (programStartTime + 7200);
 
-                            function hookManifestLoader(player) {
-                                var attempts = 0;
-                                var hookTimer = setInterval(function() {
-                                    attempts++;
-                                    var hlsPlugin = player.plugins && player.plugins.hls;
-                                    var hls = hlsPlugin && hlsPlugin.hls;
-                                    if (!hls || !hls._manifestLoader) {
-                                        if (attempts > 20) { clearInterval(hookTimer); }
-                                        return;
-                                    }
-                                    clearInterval(hookTimer);
+                        // 注入移动端视频必需的行内播放属性
+                        vue.player = new vue.$xgplayer({
+                            el: vue.$refs.livePlayer,
+                            url: shiftUrl,
+                            isLive: isLiveEdge,
+                            fluid: true,
+                            crossOrigin: true,
+                            controls: true,
+                            autoplay: true,
+                            playsinline: true,
+                            "webkit-playsinline": true,
+                            "x5-video-player-type": "h5-page",
+                            volume: volume,
+                            playbackRate: [2, 1.5, 1.25, 1, 0.75, 0.5],
+                            ignores: ["cssFullscreen"],
+                            keyShortcut: true,
+                            lang: "zh-cn",
+                            closeVideoClick: true,
+                            plugins: [vue.$hlsPlayer]
+                        });
+                        vue.player.muted = !!vue.isMuted;
 
-                                    var manifestLoader = hls._manifestLoader;
-                                    var origMlLoad = manifestLoader.load.bind(manifestLoader);
-
-                                    var _virtualPos = 0;
-                                    var _virtualPosTs = Date.now();
-                                    var _isSeeking = false;
-                                    var _hasUserSeek = false;
-                                    var _seekGeneration = 0;
-                                    var _seekDebounceTimer = null;
-                                    var _seekSwitchQueue = Promise.resolve();
-
-                                    try {
-                                        Object.defineProperty(player, "offsetCurrentTime", {
-                                            get: function() { return _virtualPos; },
-                                            set: function() {},
-                                            configurable: true,
-                                            enumerable: true
-                                        });
-                                    } catch (e) {
-                                        console.warn("[SMGTV] [Replay] Could not lock offsetCurrentTime:", e);
-                                    }
-
-                                    function clampVirtualPos(pos) {
-                                        pos = Number(pos);
-                                        if (!isFinite(pos)) return 0;
-                                        return Math.max(0, Math.min(
-                                            programEndTime - programStartTime, pos));
-                                    }
-
-                                    function publishVirtualPos() {
-                                        player.offsetCurrentTime = _virtualPos;
-                                    }
-
-                                    setInterval(function() {
-                                        if (!player.paused && !_isSeeking) {
-                                            var now = Date.now();
-                                            _virtualPos += (now - _virtualPosTs) / 1000;
-                                            _virtualPosTs = now;
-                                            _virtualPos = clampVirtualPos(_virtualPos);
-                                            publishVirtualPos();
-                                        } else {
-                                            _virtualPosTs = Date.now();
-                                        }
-                                    }, 500);
-
-                                    setInterval(function() {
-                                        if (!player.paused && !_isSeeking && !_hasUserSeek) {
-                                            _virtualPos = clampVirtualPos(player.currentTime);
-                                            _virtualPosTs = Date.now();
-                                            publishVirtualPos();
-                                        }
-                                    }, 1000);
-                                    publishVirtualPos();
-
-                                    player.seek = function(time) {
-                                        var target = clampVirtualPos(time);
-                                        var seekTs = Math.floor(programStartTime + target);
-                                        ++_seekGeneration;
-                                        var wasPaused = player.paused;
-                                        _hasUserSeek = true;
-                                        _virtualPos = target;
-                                        _virtualPosTs = Date.now();
-                                        _isSeeking = true;
-                                        publishVirtualPos();
-
-                                        if (_seekDebounceTimer) {
-                                            clearTimeout(_seekDebounceTimer);
-                                        }
-
-                                        console.log("[SMGTV] [Replay] Seek target → pos=" +
-                                            target.toFixed(1) + "s", "seekTime=" + seekTs);
-
-                                        _seekDebounceTimer = setTimeout(function() {
-                                            var finalTarget = _virtualPos;
-                                            var finalTs = Math.floor(programStartTime + finalTarget);
-                                            var finalGeneration = _seekGeneration;
-                                            var finalWasPaused = player.paused;
-
-                                            _seekSwitchQueue = _seekSwitchQueue.catch(function() {}).then(function() {
-                                                if (finalGeneration !== _seekGeneration) return;
-
-                                                var activeChId = getCurChannelId(vue);
-                                                var seekUrl = smgBuildShiftUrl(_smgTokenCache[activeChId], finalTs);
-                                                if (!seekUrl || typeof player.switchURL !== "function") {
-                                                    console.error("[SMGTV] [Replay] switchURL unavailable; seek cancelled");
-                                                    _isSeeking = false;
-                                                    return;
-                                                }
-
-                                                console.log("[SMGTV] [Replay] Switching source:",
-                                                    "vPos=" + finalTarget.toFixed(1) + "s",
-                                                    "seekTime=" + finalTs);
-
-                                                var switchPromise;
-                                                try {
-                                                    switchPromise = player.switchURL(seekUrl, {
-                                                        seamless: false,
-                                                        currentTime: 0
-                                                    });
-                                                } catch (error) {
-                                                    _isSeeking = false;
-                                                    console.error("[SMGTV] [Replay] Seek source switch failed:", error);
-                                                    return;
-                                                }
-
-                                                return Promise.resolve(switchPromise).then(function() {
-                                                    if (finalGeneration !== _seekGeneration) return;
-                                                    _isSeeking = false;
-                                                    _virtualPosTs = Date.now();
-                                                    publishVirtualPos();
-                                                    if (finalWasPaused) player.pause();
-                                                    else player.play();
-                                                    console.log("[SMGTV] [Replay] Seek source switched:",
-                                                        "vPos=" + _virtualPos.toFixed(1) + "s");
-                                                }).catch(function(error) {
-                                                    if (finalGeneration !== _seekGeneration) return;
-                                                    _isSeeking = false;
-                                                    console.error("[SMGTV] [Replay] Seek source switch failed:", error);
-                                                });
-                                            });
-                                        }, 150);
-
-                                        return undefined;
-                                    };
-
-                                    manifestLoader.load = function(url) {
-                                        if (typeof url === "string" && url.indexOf("startTime=") !== -1) {
-                                            var newStartTime = Math.floor(programStartTime + _virtualPos);
-                                            var newUrl = url.replace(/startTime=\d+/, "startTime=" + newStartTime);
-                                            if (newUrl !== url) {
-                                                console.log("[SMGTV] [Replay] startTime→",
-                                                    "vPos=" + _virtualPos.toFixed(1) + "s",
-                                                    "→ ts=" + newStartTime);
-                                            }
-                                            return origMlLoad(newUrl);
-                                        }
-                                        return origMlLoad.apply(this, arguments);
-                                    };
-
-                                    console.log("[SMGTV] [Replay] Manifest loader hooked (virtual pos tracker)");
-                                    var dur = programEndTime - programStartTime;
-                                    Object.defineProperty(player.video, "duration", {
+                        // 挂载时间轴虚拟寻道
+                        if (!isLiveEdge) {
+                            setTimeout(function() {
+                                var dur = programEndTime - programStartTime;
+                                if (vue.player && vue.player.video) {
+                                    Object.defineProperty(vue.player.video, "duration", {
                                         get: function() { return dur; },
                                         configurable: true
                                     });
-                                    player._duration = dur;
-
-                                    console.log("[SMGTV] [Replay] Program duration set:",
-                                        dur + "s (" + (dur / 60).toFixed(1) + " min)");
-                                }, 200);
-                            }
-
-                            if (!isLiveEdge) {
-                                hookManifestLoader(vue.player);
-                            } else {
-                                smgStartLiveWatchdog(vue, vue.player, function(tok) {
-                                    return smgBuildLiveUrl(tok);
-                                });
-                            }
-
-                            vue.player.on("canplay", function() {
-                                vue.isLoading = false;
-                                if (!isLiveEdge) vue.player.video.dispatchEvent(new Event("loadedmetadata"));
-                            });
-                            vue.player.on("ended", function() {
-                                if (vue.programObj.play === 0 && typeof vue.playNextProgram === "function") {
-                                    vue.playNextProgram();
                                 }
-                            });
-                            setTimeout(function() { vue.player.play(); }, 200);
-                            vue.player.video.addEventListener("click", function() {
-                                if (vue.player.paused) vue.player.play();
-                                else vue.player.pause();
-                            });
-
-                            console.log("[SMGTV] [Player] Created for:", pObj.name,
-                                "channel:", getCurChannelId(vue),
-                                "startTime:", programStartTime,
-                                "duration:", (programEndTime - programStartTime) + "s",
-                                "url:", shiftUrl.substring(0, 80));
-                            return;
+                            }, 500);
                         }
-                        console.warn("[SMGTV] [Replay] shift URL build failed, falling back to orig initPlayer");
-                        return origInitPlayer.apply(self, args);
+
+                        vue.player.on("canplay", function() {
+                            vue.isLoading = false;
+                        });
+                        setTimeout(function() {
+                            try { if (vue.player.paused) vue.player.play(); } catch(e) {}
+                        }, 300);
+                        return;
                     });
                     return;
                 }
             } catch(e) {
-                console.error("[SMGTV] [Replay] initPlayer intercept error:", e);
+                console.error("[SMGTV] initPlayer patch exception:", e);
             }
             return origInitPlayer.apply(this, arguments);
         };
         _initPlayerPatched = true;
-        console.log("[SMGTV] [Replay] initPlayer patched");
+        console.log("[SMGTV] initPlayer successfully hooked");
     }
 
+    // ===== 7. 页面状态与倒计时解锁 =====
     function tryPatch() {
         var vue = findVue();
         if (!vue) return false;
 
-        console.log("[SMGTV] Vue component found, patching...");
         patchInitPlayer(vue);
 
         function fixObj(o) {
@@ -848,29 +537,14 @@
             o.is_review = 1;
             o.can_review = 1;
         }
+
         fixObj(vue.programObj);
         fixObj(vue.programDetail);
         fixObj(vue.playingProgramObj);
         if (Array.isArray(vue.programList)) vue.programList.forEach(fixObj);
         if (Array.isArray(vue.currentProgramList)) vue.currentProgramList.forEach(fixObj);
 
-        if (vue.currChannelDetail) {
-            vue.currChannelDetail.copyright_image = "";
-        }
-        if (vue.currChannel) {
-            vue.currChannel.copyright_image = "";
-        }
-
-        if (vue.currChannelDetail && vue.currChannelDetail.live_address) {
-            if (!vue.programDetail) vue.programDetail = {};
-            if (!vue.programDetail.channel_info) vue.programDetail.channel_info = {};
-            if (!vue.programDetail.channel_info.live_address) {
-                vue.programDetail.channel_info.live_address = vue.currChannelDetail.live_address;
-            }
-        }
-
         vue.isCopyright = false;
-
         if (typeof vue.countdown === "number") vue.countdown = 99999999;
         vue.showOpenApp = false;
         vue.showFlag = false;
@@ -880,45 +554,31 @@
         if (typeof vue.pageVisibilityChange === "function") {
             document.removeEventListener("visibilitychange", vue.pageVisibilityChange);
             vue.pageVisibilityChange = function() {};
-            document.addEventListener("visibilitychange", vue.pageVisibilityChange);
         }
 
         if (!vue.player && vue.programObj && vue.programObj.id) {
-            console.log("[SMGTV] Calling initPlayer()...");
-            try { vue.initPlayer(); } catch(e) { console.error("[SMGTV] initPlayer error:", e); }
+            try { vue.initPlayer(); } catch(e) {}
         }
 
-        vue.$forceUpdate();
-        vue.__smgPatched = true;
-        console.log("[SMGTV] Patch applied!");
+        try { vue.$forceUpdate(); } catch(e) {}
         return true;
     }
 
-    if (tryPatch()) {
-        console.log("[SMGTV] Patched immediately");
-    } else {
-        console.log("[SMGTV] Waiting for component...");
-        var observer = new MutationObserver(function() {
-            if (tryPatch()) observer.disconnect();
-        });
-        observer.observe(document.documentElement, { childList: true, subtree: true });
+    // 监听 DOM 树动态加载
+    var observer = new MutationObserver(function() {
+        if (tryPatch()) observer.disconnect();
+    });
+    observer.observe(document.documentElement, { childList: true, subtree: true });
 
-        var count = 0;
-        var timer = setInterval(function() {
-            count++;
-            if (tryPatch()) {
-                clearInterval(timer);
-                observer.disconnect();
-                console.log("[SMGTV] Patched after " + count + " polls");
-            } else if (count >= 120) {
-                clearInterval(timer);
-                observer.disconnect();
-                console.warn("[SMGTV] Timeout after 60s — check Console [SMGTV] logs for diagnostics");
-            }
-        }, 500);
-    }
+    var count = 0;
+    var pollTimer = setInterval(function() {
+        count++;
+        if (tryPatch() || count >= 80) {
+            clearInterval(pollTimer);
+        }
+    }, 500);
 
-    // ===== 5. SPA route change: re-patch when user switches channels =====
+    // 路由切换保活
     var lastHref = location.href;
     setInterval(function() {
         var mask = document.querySelector(".image-mask");
@@ -926,8 +586,7 @@
 
         if (location.href !== lastHref) {
             lastHref = location.href;
-            console.log("[SMGTV] Route changed, re-patching in 2s...");
-            setTimeout(tryPatch, 2000);
+            setTimeout(tryPatch, 1500);
         }
     }, 1000);
 
