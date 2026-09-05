@@ -53,7 +53,13 @@
 
 ## 版本演进（从旧版到新版）
 
-<img width="554" height="535" alt="{8B1F09A4-5C3F-4B7F-B107-230FE2379C60}" src="https://github.com/user-attachments/assets/0e7a80df-174a-4fdf-a37d-4a044417d983" />
+| 功能 | 旧版 | 新版 |
+|------|------|------|
+| 流地址获取 | 等待接口返回 | 逆向签名 + RSA解密 + Token自举生成 |
+| 不同品类直播处理 | 未隔离 | Channel ID隔离 |
+| Token续期 | 无 | 看门狗自动续期 |
+| 回放寻道 | 无 | starttime + xgplayer |
+| 解密 | 无 | Hook Webpack |
 
 ---
 
