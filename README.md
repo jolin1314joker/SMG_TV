@@ -1,9 +1,6 @@
 # SMG_TV
 打开网页即可收看SMGTV，并解除试看倒计时与切页暂停等限制（修复五星体育串台至东方卫视 + 频道Token隔离 + Safari/Stay 兼容 + 回放与进度条拖动）
 
-# 基于https://github.com/Nolan180940/smg-f1-unlock/tree/master
- 提供的解决思路修复BUG二改完成
-
 ## 使用方法
 
 ### ① Tampermonkey 脚本（推荐）
@@ -17,7 +14,6 @@
 - ✅ 直播 + 回放（点击左侧历史节目即可回看，支持进度条拖动）
 - ✅ 拦截试看倒计时、标签页切换暂停
 - ✅ SPA 路由切换自动重新打补丁
-- ✅ Safari / Stay 兼容
 
 > 脚本 v0.20，详见 [`smg_fivestar.user.js`](./smg_fivestar.user.js)
 
@@ -61,22 +57,6 @@
 
 ---
 
-## 常见问题
-
-| 问题 | 现象 | 解决方案 |
-|------|------|---------|
-| **iOS 跳转手机版** | 访问后跳到 `m.kankanews.com`，页面 404 或者依旧有版权限制 | Safari 地址栏 → 点 `aA` → **"请求桌面网站"**（这是最需要注意的，因为手机版和桌面版网页架构不一样，这是你最有可能遇到的问题）。或 iPhone 设置 → Safari → 请求桌面网站 → 加入 `kankanews.com` |
-| **手机端无限跳转** | 页面在 `m.` 和 `live.` 之间疯狂闪烁 | v0.15 已用 `replaceState` 修复。配合"请求桌面网站"效果最佳 |
-| **回放加载慢/无画面** | 点击回放后转圈但无画面 | 回放支持 一周 内的节目 |
-| **Tampermonkey 不生效** | 脚本已安装但页面无变化 | 检查：① 脚本开关是否打开 ② 是否被当前站点禁用 ③ Console 有无 `[SMGTV]` 日志 |
-| **`initPlayer()` 报错** | 控制台 "Cannot read property of undefined" | 等页面完全加载后再运行。Console 方式看 `[SMGTV] Vue found` 日志；Tampermonkey 方式会自动重试 |
-| **版权遮罩图仍显示** | `.image-mask` 未被隐藏 | 网站可能改了 class 名。DevTools → Elements → 搜索 `copyright`，找到新 class 加入 CSS |
-| **Stay 注入无效** | 无 `[SMGTV]` 日志 | Stay 脚本设置 → 注入方式 → 改为 **Page**（非 Auto / Content） |
-| **回放 30 秒冻结** | 播放 30 秒后卡住 | v0.17 已修复。动态 `startTime` + `switchURL` 切源 |
-| **E.a 解密空 URL** | `live_address` 解密后为空 | v0.13+ 回放已绕过此问题，直接从直播流提取 token 构建偏移 URL |
-
----
-
 ## 兼容性
 
 | 平台 | 直播 | 回放 | 备注 |
@@ -85,10 +65,14 @@
 | **macOS** Safari（Stay） | ✅ | ✅ | 已测试，需开启"请求桌面网站" |
 | **iOS** Safari（Stay） | ✅ | ✅ | 已测试，必须开启"请求桌面网站" |
 | **Android** Kiwi Browser + Tampermonkey | ✅ | ✅ | 理论兼容 |
-| **Firefox** | ⚠️ | ⚠️ | 未测试 |
-| **PowerShell (run.bat)** | ✅ | ❌ | 仅直播，未更新回放功能 |
 
 ---
+
+# 基于https://github.com/Nolan180940/smg-f1-unlock/tree/master
+ 提供的解决思路修复BUG二改完成
+ 
+ ---
+
 📄 免责声明
 
 本脚本仅用于前端技术交流、学习探讨及个人无障碍观影研究，请勿用于非法用途。视频音视频源版权均归上海广播电视台（SMG）及看看新闻所有。
