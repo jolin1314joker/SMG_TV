@@ -20,16 +20,6 @@
 
     console.log("[SMGTV] ========== v0.20 (Channel-Isolated) ==========");
     console.log("[SMGTV] URL:", location.href);
-
-    // ===== 0. Mobile handling =====
-    if (location.hostname === "m.kankanews.com") {
-        var m = location.pathname.match(/^\/huikan\/(\d+)$/);
-        if (m) {
-            var fixed = "/huikan?id=" + m[1];
-            history.replaceState(null, "", fixed);
-            console.log("[SMGTV] Fixed broken mobile URL in-place:", fixed);
-        }
-    }
     console.log("[SMGTV] UA:", navigator.userAgent);
 
     // ===== 1. CSS: hide copyright mask =====
