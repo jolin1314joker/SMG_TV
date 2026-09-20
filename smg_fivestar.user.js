@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name             收看SMGTV电视节目
 // @namespace        https://github.com/jolin1314joker/SMG_TV
-// @version          0.20
-// @description      打开网页即可收看SMGTV，并解除试看倒计时与切页暂停等限制（修复五星体育串台至东方卫视 + 频道Token隔离 + Safari/Stay 兼容 + 回放与进度条拖动）
+// @version          0.20.1
+// @description      SMGTV 直播与回放；修复 CDN 签名提前到期导致的断流、重复初始化，支持自动续期和网络错误重试。
 // @author           https://github.com/jolin1314joker
 // @match            https://live.kankanews.com/*
 // @match            https://m.kankanews.com/*
@@ -18,7 +18,7 @@
 (function() {
     "use strict";
 
-    console.log("[SMGTV] ========== v0.20 (Channel-Isolated) ==========");
+    console.log("[SMGTV] ========== v0.20.1 (CDN expiry fix) ==========");
     console.log("[SMGTV] URL:", location.href);
     console.log("[SMGTV] UA:", navigator.userAgent);
 
@@ -171,6 +171,7 @@
     var SMG_DONOR_SCAN_DAYS = 7;
     // Map of channelId -> token object
     var _smgTokenCache = {};
+    var _smgTokenRequests = {};
 
     function smgMd5(str) {
         function rl(n, c) { return (n << c) | (n >>> (32 - c)); }
@@ -303,9 +304,28 @@
         var hk;
         for (hk in signed) headers[hk] = signed[hk];
         headers["M-Uuid"] = localStorage.getItem("uuid") || "";
-        return fetch("https://kapi.kankanews.com" + path + (q ? "?" + q : ""), {
-            headers: headers
-        }).then(function(resp) { return resp.json(); });
+        // Internal requests must not trigger our own Vue/initPlayer interceptor.
+        return new Promise(function(resolve, reject) {
+            var controller = typeof AbortController === "function" ? new AbortController() : null;
+            var timer = setTimeout(function() {
+                reject(new Error("API request timed out"));
+                if (controller) controller.abort();
+            }, 15000);
+            var options = { headers: headers, cache: "no-store" };
+            if (controller) options.signal = controller.signal;
+            Promise.resolve().then(function() {
+                return origFetch.call(window, "https://kapi.kankanews.com" + path + (q ? "?" + q : ""), options);
+            }).then(function(resp) {
+                if (!resp.ok) throw new Error("API HTTP " + resp.status);
+                return resp.json();
+            }).then(function(data) {
+                clearTimeout(timer);
+                resolve(data);
+            }, function(error) {
+                clearTimeout(timer);
+                reject(error);
+            });
+        });
     }
 
     function smgTokenFromUrl(url) {
@@ -315,7 +335,9 @@
             if (!token) return null;
             var match = u.pathname.match(/\/live\/([^/]+)\//);
             if (!match) return null;
-            var payload = JSON.parse(atob(token.split(".")[1]));
+            var encoded = token.split(".")[1].replace(/-/g, "+").replace(/_/g, "/");
+            while (encoded.length % 4) encoded += "=";
+            var payload = JSON.parse(atob(encoded));
             return {
                 token: token,
                 volcSecret: u.searchParams.get("volcSecret"),
@@ -329,12 +351,20 @@
     }
 
     var SMG_TOKEN_REFRESH_MARGIN = 120 * 1000;
+    function smgTokenExpiresAt(t) {
+        if (!t || !t.token || !t.volcSecret) return 0;
+        var jwtExp = Number(t.exp);
+        var cdnExp = Number(t.volcTime);
+        if (!isFinite(jwtExp) || jwtExp <= 0 || !isFinite(cdnExp) || cdnExp <= 0) return 0;
+        // The JWT can last 12 hours while the CDN signature lasts only 10 minutes.
+        return Math.min(jwtExp, cdnExp) * 1000;
+    }
     function smgTokenValid(t) {
-        return !!t && !!t.token && (t.exp * 1000 - Date.now() > SMG_TOKEN_REFRESH_MARGIN);
+        return smgTokenMsLeft(t) > SMG_TOKEN_REFRESH_MARGIN;
     }
     function smgTokenMsLeft(t) {
-        if (!t || !t.exp) return 0;
-        return t.exp * 1000 - Date.now();
+        var expiresAt = smgTokenExpiresAt(t);
+        return expiresAt ? expiresAt - Date.now() : 0;
     }
 
     // Precise donor finder: must belong to target channel
@@ -378,12 +408,25 @@
         return d.getFullYear() + "-" + mm + "-" + dd;
     }
 
-    function smgEnsureToken(vue, cb) {
+    function smgEnsureToken(vue, cb, forceRefresh) {
         var curChId = getCurChannelId(vue);
+        if (_smgTokenRequests[curChId]) {
+            _smgTokenRequests[curChId].push(cb);
+            return;
+        }
         var cached = _smgTokenCache[curChId];
-        if (smgTokenValid(cached)) {
+        if (!forceRefresh && smgTokenValid(cached)) {
             cb(cached);
             return;
+        }
+        _smgTokenRequests[curChId] = [cb];
+        function finish(t) {
+            var callbacks = _smgTokenRequests[curChId] || [];
+            delete _smgTokenRequests[curChId];
+            callbacks.forEach(function(callback) {
+                try { callback(t); }
+                catch (error) { console.error("[SMGTV] Token callback failed:", error && error.message); }
+            });
         }
 
         var tried = {};
@@ -444,7 +487,7 @@
                     scanOffset++;
                     if (!queue.length && scanOffset >= SMG_DONOR_SCAN_DAYS) {
                         console.error("[SMGTV] [Token] bootstrap failed: all donors empty for ch " + curChId);
-                        cb(null);
+                        finish(null);
                         return;
                     }
                     tryNext();
@@ -473,6 +516,7 @@
                 if (!plain) throw new Error("donor decrypt failed (id=" + donorId + ")");
                 var t = smgTokenFromUrl(plain);
                 if (!t) throw new Error("donor URL parse failed (id=" + donorId + ")");
+                if (!smgTokenValid(t)) throw new Error("donor URL expired or expires too soon (id=" + donorId + ")");
 
                 // Store isolated by channel ID
                 _smgTokenCache[curChId] = t;
@@ -480,8 +524,8 @@
                     SMG_DONOR_IDS.unshift(donorId);
                 }
                 console.log("[SMGTV] [Token] ready for ch " + curChId + " via donor " + donorId + ", stream=" + t.stream,
-                    "exp=" + new Date(t.exp * 1000).toLocaleString());
-                cb(t);
+                    "expires=" + new Date(smgTokenExpiresAt(t)).toLocaleString());
+                finish(t);
             }).catch(function(e) {
                 console.warn("[SMGTV] [Token] donor error, trying next:", e && e.message);
                 tryNext();
@@ -507,92 +551,140 @@
             "&volcTime=" + t.volcTime;
     }
 
-    // Live watchdog
-    var _smgWatchdogTimer = null;
-    function smgStartLiveWatchdog(vue, player, getUrl) {
-        smgStopLiveWatchdog();
+    // Renew the credentials used by this player, not merely the shared cache.
+    var _smgWatchdogCleanup = null;
+    function smgStartPlaybackWatchdog(vue, player, switchSource) {
+        smgStopPlaybackWatchdog();
+        var channelId = getCurChannelId(vue);
+        var activeToken = _smgTokenCache[channelId];
+        var stopped = false;
+        var refreshing = false;
+        var needsRecovery = false;
+        var errorGeneration = 0;
         var failures = 0;
-        _smgWatchdogTimer = setInterval(function() {
-            try {
-                if (!vue.player || vue.player !== player) {
-                    smgStopLiveWatchdog();
-                    return;
-                }
-                var curChId = getCurChannelId(vue);
-                var cached = _smgTokenCache[curChId];
-                var left = smgTokenMsLeft(cached);
-                if (left < SMG_TOKEN_REFRESH_MARGIN) {
-                    console.log("[SMGTV] [Live] token expiring in " + Math.max(0, Math.round(left / 1000)) +
-                        "s for ch " + curChId + ", refreshing...");
-                    _smgTokenCache[curChId] = null;
-                    smgEnsureToken(vue, function(t) {
-                        if (!t || !vue.player || vue.player !== player) return;
-                        var url = getUrl(t);
-                        if (!url || typeof player.switchURL !== "function") return;
-                        console.log("[SMGTV] [Live] switching to fresh token URL");
-                        try {
-                            Promise.resolve(player.switchURL(url, { seamless: false, currentTime: 0 }))
-                                .then(function() {
-                                    failures = 0;
-                                    if (player.paused) { try { player.play(); } catch (e) {} }
-                                    console.log("[SMGTV] [Live] token refresh done");
-                                })
-                                .catch(function(e) {
-                                    console.error("[SMGTV] [Live] token refresh failed:", e && e.message);
-                                });
-                        } catch (e) {
-                            console.error("[SMGTV] [Live] switchURL threw:", e && e.message);
-                        }
-                    });
-                    return;
-                }
-                var vd = player.video;
-                if (vd && vd.error && vd.error.code === 4 && failures < 3) {
-                    failures++;
-                    console.warn("[SMGTV] [Live] media error 4, recovery attempt " + failures);
-                    _smgTokenCache[curChId] = null;
-                    smgEnsureToken(vue, function(t) {
-                        if (!t || !vue.player || vue.player !== player) return;
-                        var url = getUrl(t);
-                        if (!url || typeof player.switchURL !== "function") return;
-                        try {
-                            Promise.resolve(player.switchURL(url, { seamless: false, currentTime: 0 }))
-                                .then(function() { if (player.paused) { try { player.play(); } catch (e) {} } })
-                                .catch(function() {});
-                        } catch (e) {}
-                    });
-                } else if (vd && !vd.error) {
-                    failures = 0;
-                }
-            } catch (e) {
-                console.warn("[SMGTV] [Live] watchdog tick failed:", e && e.message);
+        var retryAt = 0;
+        var lastPosition = Number(player.currentTime) || 0;
+        var lastProgressAt = Date.now();
+
+        function isCurrent() {
+            return !stopped && !vue._isDestroyed && vue.player === player &&
+                getCurChannelId(vue) === channelId;
+        }
+        function failed(error) {
+            if (!isCurrent()) return;
+            refreshing = false;
+            needsRecovery = true;
+            failures++;
+            retryAt = Date.now() + Math.min(120000, 15000 * Math.pow(2, Math.min(failures - 1, 3)));
+            console.warn("[SMGTV] [Playback] renewal failed; retry in " +
+                Math.round((retryAt - Date.now()) / 1000) + "s:", error && error.message);
+        }
+        function tick() {
+            if (stopped) return;
+            if (!isCurrent()) { cleanup(); return; }
+            var now = Date.now();
+            var video = player.video;
+            var position = Number(player.currentTime) || 0;
+            if (position !== lastPosition || player.paused || (video && (video.seeking || video.ended))) {
+                lastProgressAt = now;
+            } else if (now - lastProgressAt >= 60000) {
+                needsRecovery = true;
             }
-        }, 30000);
-        console.log("[SMGTV] [Live] watchdog started (30s tick)");
+            lastPosition = position;
+            if (video && video.error && video.error.code !== 1) needsRecovery = true;
+            if (refreshing || now < retryAt) return;
+            if (!needsRecovery && smgTokenMsLeft(activeToken) > SMG_TOKEN_REFRESH_MARGIN) return;
+
+            refreshing = true;
+            var generation = errorGeneration;
+            var resume = needsRecovery || !player.paused;
+            console.log("[SMGTV] [Playback] renewing ch " + channelId +
+                ", seconds left=" + Math.round(smgTokenMsLeft(activeToken) / 1000));
+            smgEnsureToken(vue, function(t) {
+                if (!isCurrent()) return;
+                if (!t) { failed(new Error("no usable playback credentials")); return; }
+                Promise.resolve().then(function() {
+                    if (isCurrent()) return switchSource(t);
+                }).then(function() {
+                    if (!isCurrent()) return;
+                    if (generation !== errorGeneration) {
+                        failed(new Error("playback error during source switch"));
+                        return;
+                    }
+                    activeToken = t;
+                    refreshing = false;
+                    needsRecovery = false;
+                    failures = 0;
+                    retryAt = Date.now() + 15000;
+                    lastPosition = Number(player.currentTime) || 0;
+                    lastProgressAt = Date.now();
+                    // HLS switchURL can start playback itself; restore an intentional pause.
+                    if (!resume) player.pause();
+                    if (resume && player.paused) {
+                        try {
+                            Promise.resolve(player.play()).catch(function(error) {
+                                console.warn("[SMGTV] [Playback] click play to resume:", error && error.message);
+                            });
+                        } catch (error) {
+                            console.warn("[SMGTV] [Playback] play failed:", error && error.message);
+                        }
+                    }
+                    console.log("[SMGTV] [Playback] renewed; expires=" +
+                        new Date(smgTokenExpiresAt(t)).toLocaleString());
+                }).catch(failed);
+            }, true);
+        }
+        function onError() {
+            if (!isCurrent()) return;
+            errorGeneration++;
+            needsRecovery = true;
+            tick();
+        }
+        function cleanup() {
+            stopped = true;
+            clearInterval(timer);
+            if (typeof player.off === "function") player.off("error", onError);
+            if (player.video) player.video.removeEventListener("error", onError);
+        }
+        var timer = setInterval(tick, 15000);
+        if (typeof player.on === "function") player.on("error", onError);
+        if (player.video) player.video.addEventListener("error", onError);
+        _smgWatchdogCleanup = cleanup;
+        console.log("[SMGTV] [Playback] watchdog started (15s tick)");
     }
-    function smgStopLiveWatchdog() {
-        if (_smgWatchdogTimer) {
-            clearInterval(_smgWatchdogTimer);
-            _smgWatchdogTimer = null;
+    function smgStopPlaybackWatchdog() {
+        if (_smgWatchdogCleanup) {
+            _smgWatchdogCleanup();
+            _smgWatchdogCleanup = null;
         }
     }
 
     // ===== 4c. Replay: dynamic startTime + real source-switch seeking =====
-    var _initPlayerPatched = false;
     function patchInitPlayer(vue) {
-        if (_initPlayerPatched) return;
         if (!vue || typeof vue.initPlayer !== "function") return;
+        if (vue.__smgInitPlayerPatched) return;
 
         var origInitPlayer = vue.initPlayer;
         vue.initPlayer = function() {
             try {
                 var pObj = vue.programObj;
                 if (pObj && pObj.start_time) {
+                    var channelId = getCurChannelId(vue);
+                    var requestKey = channelId + ":" + pObj.id + ":" + pObj.play;
+                    if (vue.__smgPendingInit === requestKey) return;
+                    vue.__smgPendingInit = requestKey;
+                    var generation = (vue.__smgInitGeneration || 0) + 1;
+                    vue.__smgInitGeneration = generation;
                     var self = this;
                     var args = arguments;
                     var isLiveEdge = pObj.play !== 0;
                     var wantStart = isLiveEdge ? 0 : pObj.start_time;
                     smgEnsureToken(vue, function(t) {
+                        if (vue.__smgInitGeneration !== generation) return;
+                        vue.__smgPendingInit = null;
+                        if (vue._isDestroyed || getCurChannelId(vue) !== channelId ||
+                            !vue.programObj || String(vue.programObj.id) !== String(pObj.id) ||
+                            (vue.programObj.play !== 0) !== isLiveEdge) return;
                         if (!t) {
                             console.error("[SMGTV] [Replay] no token, falling back to orig initPlayer");
                             return origInitPlayer.apply(self, args);
@@ -602,6 +694,7 @@
                             pObj.is_shield = 0;
                             pObj.is_review = 1;
                             vue.isCopyright = true;
+                            smgStopPlaybackWatchdog();
                             vue.destroyPlayer();
 
                             var volume = localStorage.getItem("playerVolume");
@@ -626,10 +719,15 @@
                                 plugins: [vue.$hlsPlayer]
                             });
                             vue.player.muted = vue.isMuted;
+                            var createdPlayer = vue.player;
 
                             function hookManifestLoader(player) {
                                 var attempts = 0;
                                 var hookTimer = setInterval(function() {
+                                    if (vue.player !== player || vue._isDestroyed) {
+                                        clearInterval(hookTimer);
+                                        return;
+                                    }
                                     attempts++;
                                     var hlsPlugin = player.plugins && player.plugins.hls;
                                     var hls = hlsPlugin && hlsPlugin.hls;
@@ -672,7 +770,8 @@
                                         player.offsetCurrentTime = _virtualPos;
                                     }
 
-                                    setInterval(function() {
+                                    var positionTimer = setInterval(function() {
+                                        if (vue.player !== player) { clearInterval(positionTimer); return; }
                                         if (!player.paused && !_isSeeking) {
                                             var now = Date.now();
                                             _virtualPos += (now - _virtualPosTs) / 1000;
@@ -684,7 +783,8 @@
                                         }
                                     }, 500);
 
-                                    setInterval(function() {
+                                    var syncTimer = setInterval(function() {
+                                        if (vue.player !== player) { clearInterval(syncTimer); return; }
                                         if (!player.paused && !_isSeeking && !_hasUserSeek) {
                                             _virtualPos = clampVirtualPos(player.currentTime);
                                             _virtualPosTs = Date.now();
@@ -718,7 +818,7 @@
                                             var finalWasPaused = player.paused;
 
                                             _seekSwitchQueue = _seekSwitchQueue.catch(function() {}).then(function() {
-                                                if (finalGeneration !== _seekGeneration) return;
+                                                if (finalGeneration !== _seekGeneration || vue.player !== player) return;
 
                                                 var activeChId = getCurChannelId(vue);
                                                 var seekUrl = smgBuildShiftUrl(_smgTokenCache[activeChId], finalTs);
@@ -786,6 +886,27 @@
                                     });
                                     player._duration = dur;
 
+                                    // Share the seek queue so renewal cannot race a user seek.
+                                    smgStartPlaybackWatchdog(vue, player, function(t) {
+                                        _seekSwitchQueue = _seekSwitchQueue.catch(function() {}).then(function() {
+                                            if (vue.player !== player) return;
+                                            _hasUserSeek = true;
+                                            _isSeeking = true;
+                                            var url = smgBuildShiftUrl(t, Math.floor(programStartTime + _virtualPos));
+                                            return Promise.resolve().then(function() {
+                                                return player.switchURL(url, { seamless: false, currentTime: 0 });
+                                            }).then(function() {
+                                                _isSeeking = false;
+                                                _virtualPosTs = Date.now();
+                                                publishVirtualPos();
+                                            }, function(error) {
+                                                _isSeeking = false;
+                                                throw error;
+                                            });
+                                        });
+                                        return _seekSwitchQueue;
+                                    });
+
                                     console.log("[SMGTV] [Replay] Program duration set:",
                                         dur + "s (" + (dur / 60).toFixed(1) + " min)");
                                 }, 200);
@@ -794,8 +915,8 @@
                             if (!isLiveEdge) {
                                 hookManifestLoader(vue.player);
                             } else {
-                                smgStartLiveWatchdog(vue, vue.player, function(tok) {
-                                    return smgBuildLiveUrl(tok);
+                                smgStartPlaybackWatchdog(vue, createdPlayer, function(tok) {
+                                    return createdPlayer.switchURL(smgBuildLiveUrl(tok), { seamless: false, currentTime: 0 });
                                 });
                             }
 
@@ -808,7 +929,11 @@
                                     vue.playNextProgram();
                                 }
                             });
-                            setTimeout(function() { vue.player.play(); }, 200);
+                            setTimeout(function() {
+                                if (vue.player === createdPlayer) {
+                                    Promise.resolve(createdPlayer.play()).catch(function() {});
+                                }
+                            }, 200);
                             vue.player.video.addEventListener("click", function() {
                                 if (vue.player.paused) vue.player.play();
                                 else vue.player.pause();
@@ -827,11 +952,12 @@
                     return;
                 }
             } catch(e) {
+                vue.__smgPendingInit = null;
                 console.error("[SMGTV] [Replay] initPlayer intercept error:", e);
             }
             return origInitPlayer.apply(this, arguments);
         };
-        _initPlayerPatched = true;
+        vue.__smgInitPlayerPatched = true;
         console.log("[SMGTV] [Replay] initPlayer patched");
     }
 
@@ -932,3 +1058,27 @@
     }, 1000);
 
 })();
+
+/*
+MIT License
+
+Copyright (c) 2026 roies
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+*/
