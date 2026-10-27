@@ -10,6 +10,8 @@ const setup = source.slice(0, source.indexOf('\n    if (tryPatch()) {')) + `
     window.testApi = { smgTokenFromUrl, smgTokenExpiresAt, smgTokenValid,
         smgTokenMsLeft, smgApiGet, smgEnsureToken, smgStartPlaybackWatchdog,
         smgStopPlaybackWatchdog, patchInitPlayer, tryPatch,
+        smgBuildShiftUrl, smgBuildLiveUrl, smgTokenVersion, smgVersionGte,
+        smgDetectAppVersion, smgRotateUuid, smgEnsureUuid, SMG_MIN_API_VERSION,
         cache: _smgTokenCache, requests: _smgTokenRequests };
 })();`;
 const settle = () => new Promise(resolve => setImmediate(resolve));
@@ -285,8 +287,12 @@ test('replay renewal preserves the absolute playback position', async () => {
     await settle();
     await h.advance(485000);
     assert.equal(h.switches.length, 1);
-    const start = Number(new URL(h.switches[0].url).searchParams.get('startTime'));
-    assert.ok(start >= programStart + 478 && start <= programStart + 481);
+    // Replay is a start/end window (the CDN 403s a bare startTime), so a renewal
+    // must move `start` forward while keeping the program's end bound.
+    const params = new URL(h.switches[0].url).searchParams;
+    const start = Number(params.get('start'));
+    assert.ok(start >= programStart + 478 && start <= programStart + 481, 'start follows playback');
+    assert.equal(Number(params.get('end')), h.vue.programObj.end_time, 'end stays pinned');
     assert.ok(h.vue.player.offsetCurrentTime > 480, 'renewal must not reset replay to the beginning');
 });
 
@@ -297,4 +303,73 @@ test('an intentionally paused player stays paused through scheduled renewal', as
     await h.advance(485000);
     assert.equal(h.switches.length, 1);
     assert.equal(player.paused, true);
+});
+
+test('stream tokens below the CDN minimum version are rejected and the device uuid is rotated', async () => {
+    const h = harness();
+    const makeUrl = version => {
+        const payload = Buffer.from(JSON.stringify({
+            exp: Math.floor(h.now / 1000) + 43200,
+            version,
+        })).toString('base64url');
+        return 'https://volc-stream.kksmg.com/live/test-stream/index.m3u8?' +
+            new URLSearchParams({ token: 'test.' + payload + '.test', volcSecret: 'sig', volcTime: Math.floor(h.now / 1000) + 600 });
+    };
+    // The API keeps returning a stale-version token until the device uuid changes.
+    const stored = { uuid: '' };
+    h.context.localStorage = {
+        getItem: key => (key === 'uuid' ? stored.uuid : ''),
+        setItem: (key, value) => { if (key === 'uuid') stored.uuid = value; },
+    };
+    let requests = 0;
+    h.fetchImpl = async url => {
+        requests++;
+        const stale = requests <= 2;
+        return { ok: true, status: 200, json: async () => ({ result: url.includes('/program/detail')
+            ? { channel_info: { shift_address: makeUrl(stale ? '2.42.23' : '2.45.2') } }
+            : { programs: [] } }) };
+    };
+
+    let token;
+    h.api.smgEnsureToken(h.vue, t => { token = t; }, true);
+    await settle();
+
+    assert.ok(token, 'must eventually obtain a usable token');
+    assert.equal(h.api.smgTokenVersion(token), '2.45.2');
+    assert.notEqual(stored.uuid, '', 'uuid must be regenerated');
+    assert.equal(h.api.SMG_MIN_API_VERSION, '2.45.0');
+});
+
+test('builders keep the CDN host the API returned and emit a start/end window', () => {
+    const h = harness();
+    const payload = Buffer.from(JSON.stringify({
+        exp: Math.floor(h.now / 1000) + 43200, version: '2.45.2',
+    })).toString('base64url');
+    // Tencent-hosted channels use "/live/<stream>.m3u8" instead of "/live/<stream>/index.m3u8".
+    const t = h.api.smgTokenFromUrl('https://tencent-stream.kksmg.com/live/shanghaieye.m3u8?token=jwt.' +
+        payload + '.sig&volcSecret=sig&volcTime=' + (Math.floor(h.now / 1000) + 600));
+    assert.equal(t.dir, 'https://tencent-stream.kksmg.com/live/shanghaieye/');
+
+    const live = new URL(h.api.smgBuildLiveUrl(t));
+    assert.equal(live.host, 'tencent-stream.kksmg.com');
+    assert.equal(live.pathname, '/live/shanghaieye/index.m3u8');
+    assert.equal(live.searchParams.get('start'), null);
+
+    const replay = new URL(h.api.smgBuildShiftUrl(t, 1000, 2500));
+    assert.equal(replay.searchParams.get('start'), '1000');
+    assert.equal(replay.searchParams.get('end'), '2500');
+    assert.equal(replay.searchParams.get('startTime'), null, 'startTime is no longer honoured');
+
+    assert.equal(h.api.smgBuildShiftUrl(t, 0, 0), null, 'a zero start cannot produce a window');
+    assert.equal(new URL(h.api.smgBuildShiftUrl(t, 1000, 0)).searchParams.get('end'), '8200');
+});
+
+test('version comparison follows numeric ordering, not string ordering', () => {
+    const h = harness();
+    assert.equal(h.api.smgVersionGte('2.45.0', '2.45.0'), true);
+    assert.equal(h.api.smgVersionGte('2.45.2', '2.45.0'), true);
+    assert.equal(h.api.smgVersionGte('2.9.9', '2.45.0'), false, '2.9 < 2.45 numerically');
+    assert.equal(h.api.smgVersionGte('2.44.9', '2.45.0'), false);
+    assert.equal(h.api.smgVersionGte('3.0.0', '2.45.0'), true);
+    assert.equal(h.api.smgVersionGte('', '2.45.0'), false);
 });
