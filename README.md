@@ -1,117 +1,174 @@
-# SMG_TV
-打开网页即可收看SMGTV，并解除试看倒计时与切页暂停等限制（修复 403 无限转圈 + 频道Token隔离 + Safari/Stay 兼容 + 回放与进度条拖动）
+# SMG_TV · 看东方直播解锁
 
-## 使用方法
+解除 [看看新闻 / 看东方](https://live.kankanews.com/huikan?id=10) 网页端的观看限制：**直播直连、往期节目回看、自动续期、403 自愈**。
 
-### ① Tampermonkey 脚本（推荐）
-
-1. 安装 [Tampermonkey](https://www.tampermonkey.net/) 浏览器插件
-2. 点击图标 → **创建新脚本** → 粘贴 [`smg_fivestar.user.js`](./smg_fivestar.user.js) 全部内容 → **Ctrl+S** 保存
-3. 打开 [看看新闻](https://live.kankanews.com/huikan?id=10) 即可自动生效
-
-**功能：**
-- ✅ 绕过版权限制（`is_shield` / `is_review` / `copyright_image`）
-- ✅ 直播 + 回放（点击左侧历史节目即可回看，支持进度条拖动）
-- ✅ 拦截试看倒计时、标签页切换暂停
-- ✅ SPA 路由切换自动重新打补丁
-
-> 脚本 v0.21.0，详见 [`smg_fivestar.user.js`](./smg_fivestar.user.js)。更新时替换旧脚本内容并刷新页面，避免同时启用多份脚本。
+脚本不依赖站点打包模块号，也不依赖 `window.JSEncrypt`；地址来自官方 API，签名与解密都在脚本内独立实现。站点前端改版后通常无需改脚本，只有服务端轮换签名密钥或加密公钥时才需要更新常量。
 
 ---
 
-### ② Console 粘贴
+## 安装
 
-不想装插件？直接在浏览器 Console 里粘贴代码。
+### Tampermonkey（推荐）
 
-1. 打开 [看看新闻](https://live.kankanews.com/huikan?id=10)，等页面加载完成
-2. 按 **F12** → **Console** → 粘贴代码 → 回车
-3. 看到 `✅ 已就绪` 即可使用
+1. 安装 [Tampermonkey](https://www.tampermonkey.net/)（Chrome / Edge / Firefox / Safari 均可）。
+2. 打开 Tampermonkey 面板 → **添加新脚本**。
+3. 清空模板，粘贴 [`smg_fivestar.user.js`](./smg_fivestar.user.js) 全文 → **Ctrl+S** 保存。
+4. 打开 <https://live.kankanews.com/huikan?id=10>，页面会自动生效。
 
----
+更新时**用新内容整体覆盖旧脚本**，不要同时启用两份同名脚本。
 
-🌟 核心特性
+### 控制台粘贴（临时使用）
 
-破解接口空流限制（Token 自举体系）：针对官方接口不再返回受限频道（如五星体育）播放地址的问题，通过逆向官方 API 签名并本地 RSA 解密合法供体切片，主动组装火山引擎 CDN 播放流。
-
-全频道独立流隔离（彻底修复串台）：重构 Token 与 Stream 缓存机制，实现频道 ID（Channel ID）级严格隔离，杜绝五星体育自动串流至东方卫视。
-
-播放地址自动续期：JWT 的 `exp` 与 CDN 签名的 `volcTime` 可能分别有效 12 小时和 10 分钟。脚本每 15 秒检查一次，以两者中较早的到期时间为准，提前约两分钟重新获取整套地址。网络或播放器报错后自动重试，失败时逐步延长重试间隔，最长两分钟；回放在 HLS 进度跟踪器中续期并保留当前位置。
-
-完整节目回放与随意拖动寻道：解除时移切片锁死限制，支持节目单内往期节目的回放、动态计算 startTime，并支持进度条自由拖拽寻道（Seek）。
-
-解除页面限制：解除试看倒计时、后台切页/失焦自动暂停、免除版权提示遮罩。
-
-移动端与 Safari 深度优化：
-
-自动纠正移动端跳转错误路由（/huikan/10 自动修复为 /huikan?id=10，避免 404 循环）。
-
-支持 Safari (macOS / iOS / iPadOS)、Stay 扩展及 Userscripts App。
-
-适配 iOS 原生全屏及刘海屏安全区（safe-area-inset / dvh）。
+打开频道页，等页面加载完，`F12` → Console → 粘贴脚本全文 → 回车。仅当前标签页有效，刷新即失效。
 
 ---
 
-## 版本演进（从旧版到新版）
+## 功能
 
-| 功能 | 旧版 | 新版 |
-|------|------|------|
-| 流地址获取 | 等待接口返回 | 逆向签名 + RSA解密 + Token自举生成 |
-| 不同品类直播处理 | 未隔离 | Channel ID隔离 |
-| Token续期 | 无 | 看门狗自动续期 |
-| 回放寻道 | 无 | start/end 时间窗 + xgplayer |
-| 解密 | 无 | Hook Webpack |
+| 能力 | 说明 |
+| --- | --- |
+| 直播解锁 | 8 个频道直播直连播放，不再卡在 loading 或 403 |
+| 往期回看 | 点节目单里的历史节目即可回看，支持进度条拖动寻道 |
+| 自动续期 | Token 到期前 2 分钟自动换新地址，长时间挂机不断流 |
+| 故障自愈 | 播放报错 / 卡死自动换源，指数退避重试，最长间隔 2 分钟 |
+| 解除页面限制 | 去掉试看倒计时、版权遮罩、切后台自动暂停 |
+| 换台跟随 | 页面内切频道后重新接管播放器，不串台、不漏旧监听 |
 
-### v0.21.0：修复打开 `?id=10` 一直转圈
+支持的频道：东方卫视、新闻综合、魔都眼、第一财经、新纪实、五星体育、都市频道、哈哈炫动。
 
-现象：页面加载完成但播放器一直显示 loading，控制台里所有 `index.m3u8` 请求都是 `403`（响应体为空）。
+> 魔都眼、新纪实没有排期数据，只有直播；其余 6 个频道可以回看，回看窗口约 **6 天**。
 
-根因有两层，缺一不可：
+---
 
-1. **Token 版本门槛**：CDN 会校验 JWT 里的 `version` 声明，低于站点当前版本（实测 `< 2.45.0`）的 Token 一律 403。脚本原先硬编码 `2.42.23`，站点升到 `2.45.2` 后全部失效。现改为从页面 `runtime.vX.Y.Z.js` 自动识别站点版本。
-2. **设备 ID 缓存**：接口按 `M-Uuid` 缓存 Token。旧版脚本用过的 UUID 会被永久绑定在旧版本 Token 上，即使脚本升级，接口仍返回 `2.42.23` 的 Token。因此新增：拿到 Token 后本地校验 `version` 声明，不合格则轮换一次设备 UUID 并重试供体队列（最多 3 次，不发额外探测请求）。
+## 工作原理
 
-同时修复的关联问题：
+### 1. 地址从哪来
 
-- 回放地址改用 CDN 真正识别的 `start` / `end` 时间窗；旧的 `startTime=` 参数只会返回一个冻结的 3 段伪直播列表，表现为"能加载但进度不动"。
-- 播放地址不再硬编码 `volc-stream.kksmg.com`，改用接口返回的 CDN 主机（魔都眼/新纪实走 `tencent-stream.kksmg.com`，路径形如 `/live/<stream>.m3u8`，原先的解析会直接失败）。
-- `document.head` / `document.documentElement` 在 `document-start` 可能为 `null`，原先会抛异常导致整个脚本中断；现改为延迟注入。
-- `MutationObserver.observe()` 在根节点为 `null` 时抛异常，现加空值保护。
+站点自己播放回放时读的是 `programDetail.channel_info.shift_address`，而公开的 `pc` 接口对受限频道**不再下发地址**（长久以来基于"抓一条历史节目地址当供体"的思路已整体失效）。脚本改走另外两条通道：
+
+| 用途 | 接口 | 取什么 |
+| --- | --- | --- |
+| 节目单 | `/content/pc/tv/programs` | `result.programs`（只能用 pc 前缀） |
+| 直播地址 | `/content/app/tv/channel/detail` | `live_address`（app 前缀，8 个频道都有） |
+| 回看地址 | `/content/app/tv/program/detail` | `channel_info.shift_address` |
+
+地址是 RSA 密文，脚本用内置公钥分块解密（每 128 字节一块，PKCS#1 v1.5），得到真正的 m3u8 地址。
+
+### 2. 三种 CDN，一套模型
+
+解密后的地址有三种形态，脚本统一解析成 `{url, family, token, stream, origin, exp, version}`：
+
+- **火山云** `volc-stream.kksmg.com/live/<stream>/index.m3u8?token=…&volcSecret=…&volcTime=…`
+- **腾讯云** `tencent-stream.kksmg.com/live/<stream>.m3u8?token=…&txSecret=…&txTime=<hex>`
+- **自建** `ws-channels.kksmg.com/…`（都市频道，返回带 `wsSession` 的二级清单）
+
+回看地址则可能是 `…/timeshift.m3u8?starttime=…&endtime=…`（腾讯）或 `?wsStart=…&wsEnd=…`（自建）。`smgRetimeUrl()` 会按地址形态改写对应的时间参数（时间戳是 **上海本地时间** 格式 `YYYYMMDDHHMMSS`），火山云地址则改写 `start` / `end` 秒级时间窗。
+
+### 3. 服务的三个硬约束（脚本因此必须做什么）
+
+- **UA 绑定**：JWT 里有 `ua_hash`，取地址时的 UA 必须与播放时一致，否则 403。脚本用同一个 `fetch` 上下文取地址并播放，不做任何 UA 伪装。
+- **版本门槛**：token 的 `version` 声明必须 ≥ `2.45.0`。脚本从 `window.__NUXT__` / `runtime.vX.Y.Z.js` 读出当前站点版本，探测不到时退回下限；版本号也可以手动覆盖：`localStorage.smg_version = '2.45.2'`。
+- **设备 ID 会毒化 token**：接口按 `M-Uuid` 缓存首次下发的版本。若某个 UUID 曾用旧版本取过地址，之后即使声明新版本也会拿回旧 token 并 403。脚本在收到低于下限的 token 时**轮换 UUID 并重取**（最多 3 次），同时清空缓存。
+
+### 4. 回看为什么能拖进度条
+
+回看地址是一段"以 `start` 为起点的 VOD 清单"，媒体自身时间从 0 开始，直接播进度条就只有节目开头那几个小时。脚本为播放器建立虚拟时间轴：
+
+- 定时把真实播放时长累加到 `player.offsetCurrentTime`（xgplayer 的时间/进度插件都读这个属性）；
+- 把 `video.duration` 重定义为节目总时长；
+- 重写 `player.seek(t)`：把虚拟位置换算成绝对时间，用新的 `start`/`end` 重新开一个时间窗，从该点开始拉流（`switchURL` 串行化 + 150 ms 防抖，避免连续拖动打爆 CDN）。
+
+### 5. 续期与自愈
+
+看门狗每 15 秒检查一次：
+
+- 用 JWT `exp` 与 CDN 签名时间取**较早**者作为到期时间，提前 2 分钟换新；
+- 60 秒没有进度判定为卡死，`video.error` 直接触发，两种情况都走换源；
+- 换源失败按 15s → 30s → 60s → 120s 指数退避，成功即重置；
+- 每次换源前校验 `vue.player === player`、频道 ID 与代数，切台/切节目后旧监听自动作废，不会串台。
+
+### 6. 解除页面限制
+
+站点用 `is_shield` / `is_review` / `can_review` / `isOutDate` 控制能不能看，其中 `isCopyright` 是 computed（由 `programObj` 推导），所以脚本改的是数据而非 DOM：
+
+- 直播：`programObj.is_shield = 0`；
+- 回看：`programObj.is_review = 1`；
+- 节目单：包装站点的 `handleProgramList`，对**入参**逐项放开，历史节目因此能正常点开（站点原生的 `changeProgram` 门禁就在这一步重新写回字段，只改返回值无效）；
+- 另清掉 `copyright_image`，停掉试看 `liveTimer`，把 `pageVisibilityChange` 置空（保留事件、函数体为空）。
+- CSS 兜底隐藏 `.image-mask` / `.video-tip` / `.copyright-mask`。
+
+---
+
+## 排查
+
+控制台执行：
+
+```js
+SMGTV.status()
+// { version, apiVersion, uuid, channel, liveToken, replaySources, patched }
+```
+
+- `apiVersion` 低于站点当前版本 → 执行 `localStorage.smg_version = '2.45.2'` 后刷新（版本探测失败时的兜底）。
+- 想看详细日志 → 用 `?smg_debug=1` 打开页面，或 `localStorage.smg_debug = '1'`。
+- 画面黑屏/不刷新 → 先 `SMGTV.refresh()`；仍旧异常就刷新整页。
+- 一直 403 → 多半是 UUID 被毒化，执行 `localStorage.removeItem('uuid')` 后刷新，脚本会重新生成并取新 token。
+
+常见现象对照：
+
+| 现象 | 原因 |
+| --- | --- |
+| 播放器一直转圈，`index.m3u8` 全 403 | token 版本低于 `2.45.0`，或 UUID 被旧版本毒化 |
+| 能出画面但进度不动 | 火山云地址用了 `startTime=` 旧参数，而非 `start` / `end` |
+| 回看进度条只有很短一段 | 虚拟时间轴未接管（`video.duration` 被站点重写），执行 `SMGTV.refresh()` |
+| 换台后没声音/不播放 | 旧看门狗未清理，`SMGTV.refresh()` 或刷新页面 |
 
 ---
 
 ## 兼容性
 
-| 平台 | 直播 | 回放 | 备注 |
-|------|------|------|------|
-| **Windows** Edge / Chrome | ✅ | ✅ | 已测试 |
-| **macOS** Safari（Stay） | ✅ | ✅ | 已测试，需开启"请求桌面网站" |
-| **iOS** Safari（Stay） | ✅ | ✅ | 已测试，必须开启"请求桌面网站" |
-| **Android** Kiwi Browser + Tampermonkey | ✅ | ✅ | 理论兼容 |
+| 平台 | 直播 | 回看 | 说明 |
+| --- | --- | --- | --- |
+| Windows Edge / Chrome | ✅ | ✅ | 主要验证环境 |
+| macOS Safari（Stay / Userscripts） | ✅ | ✅ | 需开启"请求桌面网站" |
+| iOS Safari（Stay / Userscripts） | ✅ | ✅ | 需开启"请求桌面网站" |
+| Android Kiwi + Tampermonkey | ✅ | ✅ | 同为 Chromium 内核 |
+| `m.kankanews.com`（移动版页面） | — | — | 脚本不注入：移动端组件结构与调用签名不同，且本身不限制观看 |
+
+脚本 `@run-at document-start`，不需要 `@grant`，不发任何第三方请求，只访问 `kapi.kankanews.com` 与站点自身的 CDN 域名。
 
 ---
 
-# 脚本来源
- 基于https://github.com/Nolan180940/smg-f1-unlock/tree/master 提供的解决思路修复BUG二改完成
- 
- ---
+## 目录
 
-📄 免责声明
+```
+SMG_TV/
+├─ smg_fivestar.user.js     # 用户脚本（单文件，无依赖）
+├─ tests/renewal.test.cjs   # Node 测试：续期 / 重试 / 并发 / 时间窗
+├─ README.md
+└─ LICENSE                  # MIT
+```
 
-本脚本仅用于前端技术交流、学习探讨及个人无障碍观影研究，请勿用于非法用途。视频音视频源版权均归上海广播电视台（SMG）及看看新闻所有。
+## 开发与测试
 
----
-
-## 开发验证
-
-使用 Node.js 20 或更高版本，无需安装依赖：
+需要 Node.js 20+，无需安装依赖：
 
 ```sh
 node --check smg_fivestar.user.js
 node --test tests/renewal.test.cjs
 ```
 
-测试通过模拟时钟、API 与播放器，覆盖连续播放 35 分钟内的多次 CDN 续期、错误重试、并发请求、频道切换、重复初始化、回放进度和暂停状态，并校验 Token 版本门槛、设备 ID 轮换与 start/end 时间窗构造。这些测试不等同于真实网站的长时间播放验证。
+测试用 `vm` 加载脚本中除启动段以外的全部代码，注入假时钟、假 API 与假播放器，覆盖 14 个场景：最早到期时间、35 分钟内多次续期、并发请求合并、API 错误与超时、媒体/HLS 错误重试、退避序列、换源不可重叠、切台清理、重复初始化、回看续期保留绝对位置、暂停态保持、旧版本 token 触发 UUID 轮换、地址构造保留 CDN 主机与时间窗、版本号按数值比较。这些测试不替代真实站点的长时间播放验证。
+
+脚本内的调试开关：`SMG_DEBUG`（`localStorage.smg_debug === '1'` 或 URL 带 `smg_debug=1`）；`SMGTV.status()` / `SMGTV.refresh()` 是内置诊断入口。
+
+---
+
+## 说明
+
+- 本脚本仅用于前端技术研究与个人观看便利，视频内容版权归上海广播电视台（SMG）及看看新闻所有。
+- 脚本不破解 DRM，不绕过登录与付费，只调整网页端自行下发的播放参数。
+- 接口、签名密钥与公钥均属服务端，若服务端轮换，需同步更新脚本顶部 `SMG_API_SECRET` / `SMG_PUBKEY`。
 
 ## License
 
-[MIT](./LICENSE)
+[MIT](./LICENSE) © 2026 roies
